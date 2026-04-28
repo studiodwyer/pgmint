@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/studiodwyer/pgmint/internal/daemon"
 	"github.com/studiodwyer/pgmint/internal/docker"
@@ -19,6 +20,7 @@ func runServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	listenAddr := fs.String("listen-addr", Defaults.ListenAddr, "address to listen on")
 	instanceName := fs.String("name", Defaults.Name, "instance name")
+	statsInterval := fs.Duration("stats-interval", 5*time.Second, "interval for collecting PostgreSQL connection metrics")
 	fs.Parse(args)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -49,13 +51,16 @@ func runServe(args []string) error {
 	slog.Info("connected to PostgreSQL")
 
 	cfg := daemon.Config{
-		PgHost:   container.PgHost,
-		PgPort:   container.Port,
-		Password: container.Password,
-		SourceDB: container.SourceDB,
+		PgHost:        container.PgHost,
+		PgPort:        container.Port,
+		Password:      container.Password,
+		SourceDB:      container.SourceDB,
+		StatsInterval: *statsInterval,
 	}
 
 	srv := daemon.New(pgMgr, cfg)
+	srv.Start(ctx)
+
 	httpServer := &http.Server{Addr: *listenAddr, Handler: srv.Handler()}
 
 	sigCh := make(chan os.Signal, 1)
