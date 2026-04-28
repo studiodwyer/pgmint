@@ -10,6 +10,13 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
+type ConnectionStats struct {
+	TotalConnections int
+	MaxConnections   int
+	ByDatabase       map[string]int
+	ByState          map[string]int
+}
+
 // DB wraps a PostgreSQL connection pool.
 type DB struct {
 	connString string
@@ -123,6 +130,47 @@ func (db *DB) DropClone(ctx context.Context, name string) error {
 	}
 
 	return nil
+}
+
+// GetConnectionStats queries pg_stat_activity for connection metrics.
+func (db *DB) GetConnectionStats(ctx context.Context) (*ConnectionStats, error) {
+	if err := db.connect(ctx); err != nil {
+		return nil, err
+	}
+
+	var maxConn int
+	if err := db.pool.QueryRow(ctx, "SHOW max_connections").Scan(&maxConn); err != nil {
+		return nil, fmt.Errorf("failed to query max_connections: %w", err)
+	}
+
+	rows, err := db.pool.Query(ctx,
+		"SELECT COALESCE(datname, '') AS datname, state, count(*) FROM pg_stat_activity GROUP BY datname, state",
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query pg_stat_activity: %w", err)
+	}
+	defer rows.Close()
+
+	stats := &ConnectionStats{
+		MaxConnections: maxConn,
+		ByDatabase:     make(map[string]int),
+		ByState:        make(map[string]int),
+	}
+
+	for rows.Next() {
+		var datname, state string
+		var count int
+		if err := rows.Scan(&datname, &state, &count); err != nil {
+			return nil, fmt.Errorf("failed to scan pg_stat_activity row: %w", err)
+		}
+		stats.TotalConnections += count
+		stats.ByState[state] += count
+		if datname != "" {
+			stats.ByDatabase[datname] += count
+		}
+	}
+
+	return stats, rows.Err()
 }
 
 // Close releases the connection pool.

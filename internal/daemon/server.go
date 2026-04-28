@@ -16,6 +16,7 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"github.com/studiodwyer/pgmint/internal/postgres"
 )
 
 // PostgresBackend defines the database operations needed by the daemon.
@@ -23,14 +24,16 @@ type PostgresBackend interface {
 	Ping(ctx context.Context) error
 	CreateClone(ctx context.Context, sourceDB, cloneName string) error
 	DropClone(ctx context.Context, name string) error
+	GetConnectionStats(ctx context.Context) (*postgres.ConnectionStats, error)
 }
 
 // Config holds daemon configuration.
 type Config struct {
-	PgHost   string
-	PgPort   int
-	Password string
-	SourceDB string
+	PgHost        string
+	PgPort        int
+	Password      string
+	SourceDB      string
+	StatsInterval time.Duration
 }
 
 // Server is the clone management HTTP daemon.
@@ -46,15 +49,19 @@ type Server struct {
 }
 
 type metrics struct {
-	clonesCreated   prometheus.Counter
-	clonesDestroyed prometheus.Counter
-	clonesFailed    *prometheus.CounterVec
-	clonesActive    prometheus.Gauge
-	cloneDuration   prometheus.Histogram
-	cloneAge        prometheus.Histogram
-	postgresUp      prometheus.Gauge
-	httpRequests    *prometheus.CounterVec
-	httpDuration    *prometheus.HistogramVec
+	clonesCreated           prometheus.Counter
+	clonesDestroyed         prometheus.Counter
+	clonesFailed            *prometheus.CounterVec
+	clonesActive            prometheus.Gauge
+	cloneDuration           prometheus.Histogram
+	cloneAge                prometheus.Histogram
+	postgresUp              prometheus.Gauge
+	httpRequests            *prometheus.CounterVec
+	httpDuration            *prometheus.HistogramVec
+	pgConnectionsTotal      prometheus.Gauge
+	pgMaxConnections        prometheus.Gauge
+	pgConnectionsByState    *prometheus.GaugeVec
+	pgConnectionsByDatabase *prometheus.GaugeVec
 }
 
 // New creates a new Server with the given backend and configuration.
@@ -100,6 +107,22 @@ func New(pg PostgresBackend, config Config) *Server {
 			Help:    "HTTP request duration in seconds",
 			Buckets: prometheus.DefBuckets,
 		}, []string{"method", "path"}),
+		pgConnectionsTotal: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "pgmint_postgres_connections_total",
+			Help: "Total number of active PostgreSQL connections",
+		}),
+		pgMaxConnections: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "pgmint_postgres_max_connections",
+			Help: "Configured PostgreSQL max_connections setting",
+		}),
+		pgConnectionsByState: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "pgmint_postgres_connections_by_state",
+			Help: "PostgreSQL connections grouped by state",
+		}, []string{"state"}),
+		pgConnectionsByDatabase: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Name: "pgmint_postgres_connections_by_database",
+			Help: "PostgreSQL connections grouped by database",
+		}, []string{"database"}),
 	}
 	reg.MustRegister(
 		m.clonesCreated,
@@ -111,6 +134,10 @@ func New(pg PostgresBackend, config Config) *Server {
 		m.postgresUp,
 		m.httpRequests,
 		m.httpDuration,
+		m.pgConnectionsTotal,
+		m.pgMaxConnections,
+		m.pgConnectionsByState,
+		m.pgConnectionsByDatabase,
 	)
 
 	m.postgresUp.Set(1)
@@ -123,6 +150,52 @@ func New(pg PostgresBackend, config Config) *Server {
 		parent:    make(map[string]string),
 		databases: make(map[string]bool),
 		createdAt: make(map[string]time.Time),
+	}
+}
+
+// Start begins the background stats collector goroutine.
+func (s *Server) Start(ctx context.Context) {
+	interval := s.config.StatsInterval
+	if interval == 0 {
+		interval = 5 * time.Second
+	}
+	go s.collectStats(ctx, interval)
+}
+
+func (s *Server) collectStats(ctx context.Context, interval time.Duration) {
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+
+	s.updateConnectionMetrics(ctx)
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			s.updateConnectionMetrics(ctx)
+		}
+	}
+}
+
+func (s *Server) updateConnectionMetrics(ctx context.Context) {
+	stats, err := s.pg.GetConnectionStats(ctx)
+	if err != nil {
+		slog.Debug("failed to collect connection stats", "error", err)
+		return
+	}
+
+	s.metrics.pgConnectionsTotal.Set(float64(stats.TotalConnections))
+	s.metrics.pgMaxConnections.Set(float64(stats.MaxConnections))
+
+	s.metrics.pgConnectionsByState.Reset()
+	for state, count := range stats.ByState {
+		s.metrics.pgConnectionsByState.WithLabelValues(state).Set(float64(count))
+	}
+
+	s.metrics.pgConnectionsByDatabase.Reset()
+	for db, count := range stats.ByDatabase {
+		s.metrics.pgConnectionsByDatabase.WithLabelValues(db).Set(float64(count))
 	}
 }
 

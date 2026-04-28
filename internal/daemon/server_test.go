@@ -8,6 +8,9 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/studiodwyer/pgmint/internal/postgres"
 )
 
 type mockPostgres struct {
@@ -16,6 +19,8 @@ type mockPostgres struct {
 	dropCloneErr   error
 	createdClones  []string
 	droppedClones  []string
+	connStats      *postgres.ConnectionStats
+	connStatsErr   error
 }
 
 func (m *mockPostgres) Ping(ctx context.Context) error {
@@ -30,6 +35,21 @@ func (m *mockPostgres) CreateClone(ctx context.Context, sourceDB, cloneName stri
 func (m *mockPostgres) DropClone(ctx context.Context, name string) error {
 	m.droppedClones = append(m.droppedClones, name)
 	return m.dropCloneErr
+}
+
+func (m *mockPostgres) GetConnectionStats(ctx context.Context) (*postgres.ConnectionStats, error) {
+	if m.connStatsErr != nil {
+		return nil, m.connStatsErr
+	}
+	if m.connStats != nil {
+		return m.connStats, nil
+	}
+	return &postgres.ConnectionStats{
+		TotalConnections: 1,
+		MaxConnections:   100,
+		ByDatabase:       map[string]int{"postgres": 1},
+		ByState:          map[string]int{"active": 1},
+	}, nil
 }
 
 func testServer(pg PostgresBackend) *Server {
@@ -556,5 +576,136 @@ func TestGenerateCloneName(t *testing.T) {
 	}
 	if len(parts[2]) != 4 {
 		t.Fatalf("expected 4-char hex suffix, got %q (len %d)", parts[2], len(parts[2]))
+	}
+}
+
+func TestConnectionStatsMetrics(t *testing.T) {
+	pg := &mockPostgres{
+		connStats: &postgres.ConnectionStats{
+			TotalConnections: 5,
+			MaxConnections:   200,
+			ByDatabase:       map[string]int{"sourcedb": 3, "clone_123": 2},
+			ByState:          map[string]int{"active": 2, "idle": 3},
+		},
+	}
+	srv := testServer(pg)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	srv.updateConnectionMetrics(ctx)
+
+	metrics := getMetrics(t, ts)
+
+	if !strings.Contains(metrics, "pgmint_postgres_connections_total 5") {
+		t.Fatalf("expected connections_total 5, got:\n%s", metrics)
+	}
+	if !strings.Contains(metrics, "pgmint_postgres_max_connections 200") {
+		t.Fatalf("expected max_connections 200, got:\n%s", metrics)
+	}
+	if !strings.Contains(metrics, `pgmint_postgres_connections_by_state{state="active"} 2`) {
+		t.Fatalf("expected connections_by_state active=2, got:\n%s", metrics)
+	}
+	if !strings.Contains(metrics, `pgmint_postgres_connections_by_state{state="idle"} 3`) {
+		t.Fatalf("expected connections_by_state idle=3, got:\n%s", metrics)
+	}
+	if !strings.Contains(metrics, `pgmint_postgres_connections_by_database{database="sourcedb"} 3`) {
+		t.Fatalf("expected connections_by_database sourcedb=3, got:\n%s", metrics)
+	}
+	if !strings.Contains(metrics, `pgmint_postgres_connections_by_database{database="clone_123"} 2`) {
+		t.Fatalf("expected connections_by_database clone_123=2, got:\n%s", metrics)
+	}
+}
+
+func TestConnectionStatsMetricsReset(t *testing.T) {
+	pg := &mockPostgres{
+		connStats: &postgres.ConnectionStats{
+			TotalConnections: 3,
+			MaxConnections:   100,
+			ByDatabase:       map[string]int{"db_a": 3},
+			ByState:          map[string]int{"active": 3},
+		},
+	}
+	srv := testServer(pg)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+	srv.updateConnectionMetrics(ctx)
+
+	metrics1 := getMetrics(t, ts)
+	if !strings.Contains(metrics1, `pgmint_postgres_connections_by_database{database="db_a"} 3`) {
+		t.Fatalf("expected db_a=3 after first update, got:\n%s", metrics1)
+	}
+
+	pg.connStats = &postgres.ConnectionStats{
+		TotalConnections: 1,
+		MaxConnections:   100,
+		ByDatabase:       map[string]int{"db_b": 1},
+		ByState:          map[string]int{"idle": 1},
+	}
+
+	srv.updateConnectionMetrics(ctx)
+
+	metrics2 := getMetrics(t, ts)
+	if strings.Contains(metrics2, `pgmint_postgres_connections_by_database{database="db_a"}`) {
+		t.Fatalf("expected db_a to be removed after reset, got:\n%s", metrics2)
+	}
+	if !strings.Contains(metrics2, `pgmint_postgres_connections_by_database{database="db_b"} 1`) {
+		t.Fatalf("expected db_b=1 after second update, got:\n%s", metrics2)
+	}
+}
+
+func TestConnectionStatsError(t *testing.T) {
+	pg := &mockPostgres{
+		connStatsErr: context.DeadlineExceeded,
+	}
+	srv := testServer(pg)
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+	srv.updateConnectionMetrics(ctx)
+
+	metrics := getMetrics(t, ts)
+	if !strings.Contains(metrics, "pgmint_postgres_connections_total 0") {
+		t.Fatalf("expected connections_total 0 after error, got:\n%s", metrics)
+	}
+	if !strings.Contains(metrics, "pgmint_postgres_max_connections 0") {
+		t.Fatalf("expected max_connections 0 after error, got:\n%s", metrics)
+	}
+	if strings.Contains(metrics, "pgmint_postgres_connections_by_state{") {
+		t.Fatalf("expected no state metrics after error, got:\n%s", metrics)
+	}
+	if strings.Contains(metrics, "pgmint_postgres_connections_by_database{") {
+		t.Fatalf("expected no database metrics after error, got:\n%s", metrics)
+	}
+}
+
+func TestCollectStatsBackground(t *testing.T) {
+	pg := &mockPostgres{
+		connStats: &postgres.ConnectionStats{
+			TotalConnections: 7,
+			MaxConnections:   100,
+			ByDatabase:       map[string]int{"testdb": 7},
+			ByState:          map[string]int{"active": 7},
+		},
+	}
+	srv := testServer(pg)
+	srv.config.StatsInterval = 50 * time.Millisecond
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	srv.Start(ctx)
+
+	ts := httptest.NewServer(srv.Handler())
+	defer ts.Close()
+
+	time.Sleep(150 * time.Millisecond)
+
+	metrics := getMetrics(t, ts)
+	if !strings.Contains(metrics, "pgmint_postgres_connections_total 7") {
+		t.Fatalf("expected connection metrics after background collection, got:\n%s", metrics)
 	}
 }

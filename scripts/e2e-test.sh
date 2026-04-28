@@ -68,7 +68,8 @@ CONN_STR=$("${BINARY}" init --debug --name "${INSTANCE_NAME}" \
   --pg-port "${PG_PORT}" \
   --source-db "sourcedb" \
   --password "testpass" \
-  --pg-host "localhost")
+  --pg-host "localhost" \
+  --pg-param max_connections=200)
 echo "connection string: ${CONN_STR}"
 
 echo ""
@@ -99,7 +100,7 @@ PGPASSWORD=testpass psql -h localhost -p "${PG_PORT}" -U postgres -d sourcedb \
 
 echo ""
 echo "--- starting daemon ---"
-"${BINARY}" serve --debug --name "${INSTANCE_NAME}" --listen-addr "127.0.0.1:${DAEMON_PORT}" &
+"${BINARY}" serve --debug --name "${INSTANCE_NAME}" --listen-addr "127.0.0.1:${DAEMON_PORT}" --stats-interval 1s &
 DAEMON_PID=$!
 sleep 2
 
@@ -207,6 +208,18 @@ METRICS=$(curl -sf "http://127.0.0.1:${DAEMON_PORT}/metrics")
 echo "${METRICS}" | grep "pgmint_clones_created_total 5" >/dev/null && echo "PASS: clones_created_total = 5" || echo "WARN: clones_created_total not found"
 echo "${METRICS}" | grep "pgmint_clones_destroyed_total 3" >/dev/null && echo "PASS: clones_destroyed_total = 3" || echo "WARN: clones_destroyed_total not found"
 echo "${METRICS}" | grep "pgmint_clones_active 2" >/dev/null && echo "PASS: clones_active = 2" || echo "WARN: clones_active not found"
+
+echo ""
+echo "--- check postgres config metrics ---"
+echo "${METRICS}" | grep "pgmint_postgres_max_connections 200" >/dev/null && echo "PASS: max_connections = 200" || echo "WARN: max_connections not 200"
+echo "${METRICS}" | grep "pgmint_postgres_connections_total" >/dev/null && echo "PASS: connections_total present" || echo "WARN: connections_total not found"
+echo "${METRICS}" | grep "pgmint_postgres_connections_by_state" >/dev/null && echo "PASS: connections_by_state present" || echo "WARN: connections_by_state not found"
+echo "${METRICS}" | grep "pgmint_postgres_connections_by_database" >/dev/null && echo "PASS: connections_by_database present" || echo "WARN: connections_by_database not found"
+
+echo ""
+echo "--- verify pg_param applied in postgres ---"
+MAX_CONN_VAL=$(PGPASSWORD=testpass psql -h localhost -p "${PG_PORT}" -U postgres -t -c "SHOW max_connections;" 2>/dev/null | tr -d '[:space:]')
+assert_status "max_connections in postgres" "200" "${MAX_CONN_VAL}"
 
 echo ""
 echo "=== ALL TESTS PASSED ==="

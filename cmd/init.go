@@ -6,11 +6,34 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/studiodwyer/pgmint/internal/docker"
 	"github.com/studiodwyer/pgmint/internal/postgres"
 )
+
+type pgParamValue map[string]string
+
+func (p pgParamValue) String() string {
+	parts := make([]string, 0, len(p))
+	for k, v := range p {
+		parts = append(parts, k+"="+v)
+	}
+	return strings.Join(parts, ",")
+}
+
+func (p pgParamValue) Set(value string) error {
+	k, v, ok := strings.Cut(value, "=")
+	if !ok {
+		return fmt.Errorf("invalid postgres parameter %q: expected key=value format", value)
+	}
+	if k == "" {
+		return fmt.Errorf("empty key in postgres parameter %q", value)
+	}
+	p[k] = v
+	return nil
+}
 
 func runInit(args []string) error {
 	fs := flag.NewFlagSet("init", flag.ExitOnError)
@@ -20,6 +43,8 @@ func runInit(args []string) error {
 	password := fs.String("password", "", "PostgreSQL password (env: PG_PASSWORD, default: "+Defaults.Password+")")
 	pgHost := fs.String("pg-host", Defaults.PgHost, "host address used in connection strings")
 	instanceName := fs.String("name", Defaults.Name, "instance name (used as Docker container name and label)")
+	pgParams := make(pgParamValue)
+	fs.Var(pgParams, "pg-param", "PostgreSQL config parameter in key=value format (repeatable, e.g. --pg-param max_connections=200)")
 	fs.Parse(args)
 
 	ctx := context.Background()
@@ -44,6 +69,7 @@ func runInit(args []string) error {
 		SourceDB: *sourceDB,
 		Password: pw,
 		PgHost:   *pgHost,
+		PgParams: pgParams,
 	}
 
 	slog.Info("creating container", "name", *instanceName, "image", *postgresImage, "port", *pgPort)

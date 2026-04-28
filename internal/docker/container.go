@@ -33,6 +33,7 @@ type CreateOpts struct {
 	SourceDB string
 	Password string
 	PgHost   string
+	PgParams map[string]string
 }
 
 // Manager manages pgmint Docker containers.
@@ -116,6 +117,14 @@ func (m *Manager) Create(ctx context.Context, opts CreateOpts) (*Container, erro
 			"pgmint.password":  opts.Password,
 			"pgmint.pg-port":   strconv.Itoa(opts.PgPort),
 		},
+	}
+
+	if len(opts.PgParams) > 0 {
+		cmd := []string{"postgres"}
+		for k, v := range opts.PgParams {
+			cmd = append(cmd, "-c", fmt.Sprintf("%s=%s", k, v))
+		}
+		containerConfig.Cmd = cmd
 	}
 
 	hostConfig := &container.HostConfig{
