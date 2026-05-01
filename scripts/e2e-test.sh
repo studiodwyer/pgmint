@@ -9,6 +9,15 @@ PG_PORT=""
 DAEMON_PORT=""
 DAEMON_PID=""
 
+if [[ "$(uname -s)" == "Darwin" && -z "${DOCKER_HOST:-}" ]]; then
+  _host="$(docker context inspect --format '{{.Endpoints.docker.Host}}' 2>/dev/null || true)"
+  if [[ -n "${_host}" ]]; then
+    export DOCKER_HOST="${_host}"
+    echo "macOS: detected DOCKER_HOST=${DOCKER_HOST}"
+  fi
+fi
+unset _host
+
 cleanup() {
   echo ""
   echo "--- cleanup ---"
@@ -205,16 +214,16 @@ assert_status "destroy clone #1" "204" "${DESTROY_STATUS}"
 echo ""
 echo "--- check metrics ---"
 METRICS=$(curl -sf "http://127.0.0.1:${DAEMON_PORT}/metrics")
-echo "${METRICS}" | grep "pgmint_clones_created_total 5" >/dev/null && echo "PASS: clones_created_total = 5" || echo "WARN: clones_created_total not found"
-echo "${METRICS}" | grep "pgmint_clones_destroyed_total 3" >/dev/null && echo "PASS: clones_destroyed_total = 3" || echo "WARN: clones_destroyed_total not found"
-echo "${METRICS}" | grep "pgmint_clones_active 2" >/dev/null && echo "PASS: clones_active = 2" || echo "WARN: clones_active not found"
+echo "${METRICS}" | grep "pgmint_clones_created_total 4" >/dev/null && echo "PASS: clones_created_total = 4" || { echo "FAIL: clones_created_total not 4"; exit 1; }
+echo "${METRICS}" | grep "pgmint_clones_destroyed_total 3" >/dev/null && echo "PASS: clones_destroyed_total = 3" || { echo "FAIL: clones_destroyed_total not 3"; exit 1; }
+echo "${METRICS}" | grep "pgmint_clones_active 1" >/dev/null && echo "PASS: clones_active = 1" || { echo "FAIL: clones_active not 1"; exit 1; }
 
 echo ""
 echo "--- check postgres config metrics ---"
-echo "${METRICS}" | grep "pgmint_postgres_max_connections 200" >/dev/null && echo "PASS: max_connections = 200" || echo "WARN: max_connections not 200"
-echo "${METRICS}" | grep "pgmint_postgres_connections_total" >/dev/null && echo "PASS: connections_total present" || echo "WARN: connections_total not found"
-echo "${METRICS}" | grep "pgmint_postgres_connections_by_state" >/dev/null && echo "PASS: connections_by_state present" || echo "WARN: connections_by_state not found"
-echo "${METRICS}" | grep "pgmint_postgres_connections_by_database" >/dev/null && echo "PASS: connections_by_database present" || echo "WARN: connections_by_database not found"
+echo "${METRICS}" | grep "pgmint_postgres_max_connections 200" >/dev/null && echo "PASS: max_connections = 200" || { echo "FAIL: max_connections not 200"; exit 1; }
+echo "${METRICS}" | grep "pgmint_postgres_connections_total" >/dev/null && echo "PASS: connections_total present" || { echo "FAIL: connections_total not found"; exit 1; }
+echo "${METRICS}" | grep "pgmint_postgres_connections_by_state" >/dev/null && echo "PASS: connections_by_state present" || { echo "FAIL: connections_by_state not found"; exit 1; }
+echo "${METRICS}" | grep "pgmint_postgres_connections_by_database" >/dev/null && echo "PASS: connections_by_database present" || { echo "FAIL: connections_by_database not found"; exit 1; }
 
 echo ""
 echo "--- verify pg_param applied in postgres ---"
