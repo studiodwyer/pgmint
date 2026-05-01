@@ -181,7 +181,7 @@ func (s *Server) collectStats(ctx context.Context, interval time.Duration) {
 func (s *Server) updateConnectionMetrics(ctx context.Context) {
 	stats, err := s.pg.GetConnectionStats(ctx)
 	if err != nil {
-		slog.Debug("failed to collect connection stats", "error", err)
+		slog.Error("failed to collect connection stats", "error", err)
 		return
 	}
 
