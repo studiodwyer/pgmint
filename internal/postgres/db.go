@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -138,13 +139,17 @@ func (db *DB) GetConnectionStats(ctx context.Context) (*ConnectionStats, error) 
 		return nil, err
 	}
 
-	var maxConn int
-	if err := db.pool.QueryRow(ctx, "SHOW max_connections").Scan(&maxConn); err != nil {
+	var maxConnStr string
+	if err := db.pool.QueryRow(ctx, "SHOW max_connections").Scan(&maxConnStr); err != nil {
 		return nil, fmt.Errorf("failed to query max_connections: %w", err)
+	}
+	maxConn, err := strconv.Atoi(strings.TrimSpace(maxConnStr))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse max_connections %q: %w", maxConnStr, err)
 	}
 
 	rows, err := db.pool.Query(ctx,
-		"SELECT COALESCE(datname, '') AS datname, state, count(*) FROM pg_stat_activity GROUP BY datname, state",
+		"SELECT COALESCE(datname, '') AS datname, COALESCE(state, '') AS state, count(*) FROM pg_stat_activity GROUP BY datname, state",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query pg_stat_activity: %w", err)
