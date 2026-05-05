@@ -19,7 +19,7 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Install postgresql client
+      - name: install postgresql client
         run: sudo apt-get update && sudo apt-get install -y postgresql-client
       - run: make e2e
 
@@ -36,13 +36,22 @@ jobs:
       - uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
-      - name: Set version
-        run: echo "VERSION=$(date +%Y%m%d)-$(git rev-parse --short HEAD)" >> "$GITHUB_ENV"
-      - name: Create tag
-        run: git tag "$VERSION"
-      - uses: goreleaser/goreleaser-action@v6
+      - name: install svu
+        run: go install github.com/caarlos0/svu/v3@latest
+      - name: Compute next version
+        id: svu
+        run: |
+          CURRENT=$(svu current)
+          NEXT=$(svu next)
+          echo "next=$NEXT" >> "$GITHUB_OUTPUT"
+          [ "$CURRENT" != "$NEXT" ] && echo "skip=false" >> "$GITHUB_OUTPUT" || echo "skip=true" >> "$GITHUB_OUTPUT"
+      - name: tag
+        if: steps.svu.outputs.skip == 'false'
+        run: git tag "${{ steps.svu.outputs.next }}"
+      - uses: goreleaser/goreleaser-action@v7
+        if: steps.svu.outputs.skip == 'false'
         with:
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          GORELEASER_CURRENT_TAG: ${{ env.VERSION }}
+          GORELEASER_CURRENT_TAG: ${{ steps.svu.outputs.next }}
