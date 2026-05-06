@@ -20,7 +20,7 @@ var Defaults = struct {
 }{
 	Name:          "pgmint",
 	PgPort:        5432,
-	PostgresImage: "postgres:13",
+	PostgresImage: "postgres:18",
 	SourceDB:      "sourcedb",
 	PgHost:        "localhost",
 	Password:      "postgres",
